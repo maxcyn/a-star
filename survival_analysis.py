@@ -55,7 +55,17 @@ def prepare_df():
     # Update df_analysis with the mapped region assignments
     df_analysis['Region'] = gdf_with_region['Name'].values
 
-    # Add age column
-    df_analysis['Age'] = (max(df_analysis['Entry Date']) - df_analysis['Entry Date']).dt.days / 365.25
-
     return df_analysis
+
+def obtain_survival_fractions(df, category=None, filter_val=None):
+
+    df1 = df.copy()
+    if category is not None:
+        df1 = df1[df1[category]==filter_val]
+
+    surv_frac = df1.groupby('age_bin', observed=True)['status'].mean().reset_index()
+    surv_frac = surv_frac[surv_frac['status'] != 0]
+    survival_fractions = np.array(surv_frac['status'])
+    ages = surv_frac['age_bin'].apply(lambda x: x.right)
+
+    return survival_fractions, ages
