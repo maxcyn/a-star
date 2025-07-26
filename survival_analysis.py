@@ -59,9 +59,23 @@ def prepare_df():
 
 def obtain_survival_fractions(df, category=None, filter_val=None):
 
+    '''
+    Inputs:
+    df = dataframe with 'age' and 'status' column
+    category = column header to filter for
+    filter_val = what to filter for within the category
+
+    Returns:
+    survival fractions, ages
+    '''
+
     df1 = df.copy()
     if category is not None:
         df1 = df1[df1[category]==filter_val]
+
+    # Create age bins (e.g., every 2 years)
+    bins = np.arange(0, df1['age'].max() + 1, 0.2)
+    df1['age_bin'] = pd.cut(df1['age'], bins)
 
     surv_frac = df1.groupby('age_bin', observed=True)['status'].mean().reset_index()
     surv_frac = surv_frac[surv_frac['status'] != 0]
