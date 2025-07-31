@@ -80,7 +80,7 @@ def obtain_survival_fractions(df, category=None, filter_val=None):
     surv_frac = df1.groupby('age_bin', observed=True)['status'].mean().reset_index()
     surv_frac = surv_frac[surv_frac['status'] != 0]
     survival_fractions = np.array(surv_frac['status'])
-    ages = surv_frac['age_bin'].apply(lambda x: x.right)
+    ages = surv_frac['age_bin'].apply(lambda x: x.right).to_numpy()
 
     return survival_fractions, ages
 
