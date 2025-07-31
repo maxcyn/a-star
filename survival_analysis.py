@@ -83,3 +83,20 @@ def obtain_survival_fractions(df, category=None, filter_val=None):
     ages = surv_frac['age_bin'].apply(lambda x: x.right)
 
     return survival_fractions, ages
+
+def obtain_total_alive_count(df, category=None, filter_val=None):
+    df1 = df.copy()
+
+    if category is not None:
+        df1 = df1[df1[category]==filter_val]
+
+    bins = np.arange(0, df1['age'].max() + 1, 0.2)
+    df1['age_bin'] = pd.cut(df1['age'], bins)
+
+    # Total firms per age bin (alive or dead)
+    totals = df1.groupby('age_bin', observed=True).size().to_numpy()
+
+    # Number of survivors (status = 1 means alive)
+    survivors = df1.groupby('age_bin', observed=True)['status'].sum().to_numpy()
+
+    return totals, survivors
