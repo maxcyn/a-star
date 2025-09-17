@@ -103,8 +103,8 @@ def fit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 6, 10, 
         (0.5, 50),    # m
         (3, 10),      # t_e
         (0, 20),    # eps0
-        (10e-6, 10),      # tau1
-        (10e-6, 10),      # tau2
+        (0.01, 10),      # tau1
+        (0.01, 10),      # tau2
         (10e-6, 10)      # lam
     ]
 

@@ -94,7 +94,7 @@ def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 
     '''
     bounds = [
         (0.01, 0.3),   # mu_ub
-        (0.01, 0.15),   # mu_lb
+        (0.001, 0.15),   # mu_lb
         (0.1, 30),     # K
         (0.5, 50),    # m
         (3, 10),      # t_e
@@ -130,7 +130,7 @@ def lsqfit_hill_with_dip(ages, survival_fractions, initial_guess=[0.1, 0.05, 10,
     '''
     bounds = [
         (0.01, 0.3),   # mu_ub
-        (0.01, 0.15),   # mu_lb
+        (0.001, 0.15),   # mu_lb
         (0.1, 30),     # K
         (0.5, 50),    # m
         (3, 10),      # t_e
