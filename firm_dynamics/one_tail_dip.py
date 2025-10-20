@@ -4,6 +4,7 @@ from scipy.integrate import quad
 from firm_dynamics.survival_analysis import obtain_survival_fractions, obtain_total_alive_count
 from scipy.optimize import minimize
 
+
 def epsilon(s, a, eps0, tau, lam, t_e):
     '''
     Time-dependent perturbation function
@@ -16,8 +17,8 @@ def epsilon(s, a, eps0, tau, lam, t_e):
     - t_e: time of event causing the perturbation
     '''
     def g(a, eps0, tau, t_e):
-        if a <= t_e:
-            return eps0 * np.exp((t_e - a) * tau)
+        if a >= t_e:
+            return eps0 * np.exp((a-t_e) * tau)
         else:
             return eps0
     if s < a - t_e:
@@ -25,12 +26,15 @@ def epsilon(s, a, eps0, tau, lam, t_e):
     else:
         return g(a, eps0, tau, t_e)*np.exp(-lam*(t_e-(a-s)))
 
+
 def hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
     val, _ = quad(lambda s: hill_hazard(s, mu_ub, mu_lb, K, m) * epsilon(s, a, eps0, tau, lam, t_e), 0, a)
     return hill_survival_function(a, mu_ub, mu_lb, K, m) * np.exp(-val)
 
+
 def model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
     return np.array([hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam) for a in ages])
+
 
 def find_dip(df_analysis, sector):
     '''
@@ -78,6 +82,7 @@ def find_dip(df_analysis, sector):
 
     return float(np.mean(best_cluster)) if len(best_cluster) > 0 else None
 
+
 def neg_ll_hill_with_dip(params, ages, survivors, totals):
     mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
     ll = 0
@@ -90,6 +95,7 @@ def neg_ll_hill_with_dip(params, ages, survivors, totals):
     deaths = totals - survivors
     logL = np.sum(survivors * np.log(S_vals) + deaths * np.log(1 - S_vals))
     return -logL  # minimize negative log-likelihood
+
 
 def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
     '''
@@ -121,11 +127,13 @@ def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 
 
     return result
 
+
 def lsq_hill_with_dip(params, ages, survival_fractions):
     mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
     model = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
     model = np.clip(model, 1e-12, 1 - 1e-12)
     return np.sum((survival_fractions - model) ** 2)
+
 
 def lsqfit_hill_with_dip(ages, survival_fractions, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
     '''
