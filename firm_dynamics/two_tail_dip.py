@@ -1,33 +1,37 @@
-from hill import *
+from firm_dynamics.hill import *
 import numpy as np
 from scipy.integrate import quad
-from survival_analysis import obtain_survival_fractions, obtain_total_alive_count
+from firm_dynamics.survival_analysis import obtain_survival_fractions, obtain_total_alive_count
 from scipy.optimize import minimize
 
-def epsilon(s, a, eps0, tau, lam, t_e):
+def epsilon(s, a, eps0, tau1, tau2, lam, t_e):
     '''
     Time-dependent perturbation function
     Inputs:
     - s: integration variable (time)
     - a: age
     - eps0: amplitude of the perturbation
-    - tau: decay rate (against age of firm) of the effect of external event
+    - tau1: decay rate (against age of firm) of the effect of external event on firms born after t_e
+    - tau2: decay rate (against age of firm) of the effect of external event on firms born before t_e
     - lam: recovery rate (against time since event)
     - t_e: time of event causing the perturbation
     '''
-    def g(a, eps0, tau, t_e):
-        return eps0 * np.exp(-abs(a - t_e) * tau)
-    if s < a - t_e:
+    def g(a, eps0, tau1, tau2, t_e):
+        if a < t_e:
+            return eps0 * np.exp(-abs(a - t_e) * tau1)
+        else:
+            return eps0 * np.exp(-abs(a - t_e) * tau2)
+    if s < a-t_e:
         return 0
     else:
-        return g(a, eps0, tau, t_e)*np.exp(-lam*(t_e-(a-s)))
+        return g(a, eps0, tau1, tau2, t_e)*np.exp(-lam*(t_e-(a-s)))
 
-def hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
-    val, _ = quad(lambda s: hill_hazard(s, mu_ub, mu_lb, K, m) * epsilon(s, a, eps0, tau, lam, t_e), 0, a)
+def hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2, lam):
+    val, _ = quad(lambda s: hill_hazard(s, mu_ub, mu_lb, K, m) * epsilon(s, a, eps0, tau1, tau2, lam, t_e), 0, a)
     return hill_survival_function(a, mu_ub, mu_lb, K, m) * np.exp(-val)
 
-def model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
-    return np.array([hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam) for a in ages])
+def model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2, lam):
+    return np.array([hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2, lam) for a in ages])
 
 def find_dip(df_analysis, sector):
     '''
@@ -76,21 +80,21 @@ def find_dip(df_analysis, sector):
     return float(np.mean(best_cluster)) if len(best_cluster) > 0 else None
 
 def neg_ll_hill_with_dip(params, ages, survivors, totals):
-    mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
+    mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2, lam = params
     ll = 0
-    if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0 or t_e < 0 or eps0 < 0 or tau <= 0 or lam <= 0:
+    if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0 or t_e < 0 or eps0 < 0 or tau1 <= 0 or tau2 <= 0 or lam <= 0:
         return np.inf
 
-    S_vals = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
+    S_vals = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2, lam)
     S_vals = np.clip(S_vals, 1e-12, 1 - 1e-12)  # avoid log(0)
 
     deaths = totals - survivors
     logL = np.sum(survivors * np.log(S_vals) + deaths * np.log(1 - S_vals))
     return -logL  # minimize negative log-likelihood
 
-def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
+def fit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 6, 10, 5, 1, 1, 1, 1]):
     '''
-    Fit the Hill model with dip using MLE.
+    MLE fitting for Hill model with dip
     '''
     bounds = [
         (0.01, 0.3),   # mu_ub
@@ -99,13 +103,16 @@ def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 
         (0.5, 50),    # m
         (3, 10),      # t_e
         (0, 20),    # eps0
-        (0.01, 10),      # tau
+        (0.01, 10),      # tau1
+        (0.01, 10),      # tau2
         (10e-6, 10)      # lam
     ]
 
+    # Constraint: tau1 > lam and tau2 > lam
     constraints = [
         {'type': 'ineq', 'fun': lambda x: x[0] - x[1]},  # mu_ub - mu_lb > 0
-        {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
+        {'type': 'ineq', 'fun': lambda x: x[6] - x[8]},  # tau1 - lam > 0
+        {'type': 'ineq', 'fun': lambda x: x[7] - x[8]},  # tau2 - lam > 0
     ]
 
     result = minimize(
@@ -119,28 +126,7 @@ def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 
     return result
 
 def lsq_hill_with_dip(params, ages, survival_fractions):
-    mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
-    model = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
+    mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2 = params
+    model = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau1, tau2)
     model = np.clip(model, 1e-12, 1 - 1e-12)
     return np.sum((survival_fractions - model) ** 2)
-
-def lsqfit_hill_with_dip(ages, survival_fractions, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
-    '''
-    Least squares fit for the Hill model with dip.
-    '''
-    bounds = [
-        (0.01, 0.3),   # mu_ub
-        (0.001, 0.15),   # mu_lb
-        (0.1, 30),     # K
-        (0.5, 50),    # m
-        (3, 10),      # t_e
-        (0, 20),    # eps0
-        (0.01, 10),      # tau
-        (10e-6, 10)      # lam
-    ]
-
-    constraints = [
-        {'type': 'ineq', 'fun': lambda x: x[0] - x[1]},  # mu_ub - mu_lb > 0
-        {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
-    ]
-    minimize(lsq_hill_with_dip, initial_guess, args=(ages, survival_fractions), bounds=bounds, constraints=constraints)
