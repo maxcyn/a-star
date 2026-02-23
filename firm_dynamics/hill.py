@@ -1,3 +1,7 @@
+import numpy as np
+from scipy.integrate import cumulative_trapezoid
+
+
 def hill_hazard(a, mu_ub, mu_lb, K, m):
     '''
     Hill function
@@ -10,30 +14,24 @@ def hill_hazard(a, mu_ub, mu_lb, K, m):
     '''
     return mu_ub - (mu_ub - mu_lb) * (a**m) / (a**m + K**m + 1e-10)
 
-def hill_survival_function(a, mu_ub, mu_lb, K, m):
-    '''
-    e^(-integrate u)
-    '''
-    import numpy as np
-    from scipy.integrate import quad
-
-    result, _ = quad(lambda s: hill_hazard(s, mu_ub, mu_lb, K, m), 0, a)
-    return np.exp(-result)
 
 def model_survival_curve_hill(ages, mu_ub, mu_lb, K, m):
     '''
-    Model the survival curve using the Hill function.
+    Compute the survival curve based on the Hill hazard function.
     '''
-    import numpy as np
+    hazard_rates = hill_hazard(ages, mu_ub, mu_lb, K, m)
+    initial_cum = hazard_rates[0] * ages[0]  # Approximate integral from 0 to first age
+    cumulative_hazard = cumulative_trapezoid(hazard_rates, ages, initial=initial_cum)
+    survival_curve = np.exp(-cumulative_hazard)
+    return survival_curve
 
-    return np.array([hill_survival_function(a, mu_ub, mu_lb, K, m) for a in ages])
 
 def neg_log_likelihood_hill(params, ages, survivors, totals):
     '''
     Negative log-likelihood function for the Hill model.
     '''
     import numpy as np
-    
+
     mu_ub, mu_lb, K, m = params
     if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0:
         return np.inf

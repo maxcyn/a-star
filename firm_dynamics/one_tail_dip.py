@@ -1,6 +1,6 @@
-from firm_dynamics.hill import hill_survival_function, hill_hazard, model_survival_curve_hill
+from firm_dynamics.hill import hill_hazard, model_survival_curve_hill
 import numpy as np
-from scipy.integrate import quad
+from scipy.integrate import cumulative_trapezoid
 from firm_dynamics.survival_analysis import obtain_survival_fractions, obtain_total_alive_count
 from scipy.optimize import minimize
 
@@ -17,23 +17,140 @@ def epsilon(s, a, eps0, tau, lam, t_e):
     - t_e: time of event causing the perturbation
     '''
     def g(a, eps0, tau, t_e):
-        if a < t_e:
-            return eps0
-        else:
-            return eps0 * np.exp(-abs(a - t_e) * tau)
+        return eps0 * np.exp(-abs(a - t_e) * tau)
     if s < a - t_e:
         return 0
     else:
         return g(a, eps0, tau, t_e)*np.exp(-lam*(t_e-(a-s)))
 
 
-def hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
-    val, _ = quad(lambda s: hill_hazard(s, mu_ub, mu_lb, K, m) * epsilon(s, a, eps0, tau, lam, t_e), 0, a)
-    return hill_survival_function(a, mu_ub, mu_lb, K, m) * np.exp(-val)
+def hazard_with_perturbation(a, s, mu_ub, mu_lb, K, m,
+                             eps0, tau, lam, t_e):
+    """
+    μ_pert(a,s) = (1 + ε(a,s)) μ_Hill(s)
+    """
+    base = hill_hazard(s, mu_ub, mu_lb, K, m)
+    eps = epsilon(a, s, eps0, tau, lam, t_e)
+    return (1.0 + eps) * base
 
 
-def model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam):
-    return np.array([hill_survival_with_dip(a, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam) for a in ages])
+python
+import numpy as np
+from scipy.integrate import quad
+
+# 1. Baseline Hill hazard
+def hill_hazard(s, mu_ub, mu_lb, K, m):
+    """
+    Hill-type hazard function μ_Hill(s).
+    s: age (can be scalar or array)
+    """
+    s = np.asarray(s)
+    # Avoid division by zero when s=0
+    s_m = np.power(s, m)
+    denom = s_m + np.power(K, m)
+    frac = np.zeros_like(s, dtype=float)
+    mask = denom > 0
+    frac[mask] = s_m[mask] / denom[mask]
+    
+    mu = mu_ub - (mu_ub - mu_lb) * frac
+    return mu
+
+
+# 2. g(a): event-age amplitude function
+def g_of_a(a, eps0, tau, t_e):
+    """
+    g(a) governing initial amplitude of perturbation at cohort age a.
+    """
+    a = np.asarray(a)
+    g = np.empty_like(a, dtype=float)
+    
+    # Before event age
+    before = a < t_e
+    g[before] = eps0
+    
+    # After event age
+    after = ~before
+    g[after] = eps0 * np.exp(-tau * (a[after] - t_e))
+    
+    return g
+
+
+# 3. epsilon(a, s): perturbation term
+def epsilon(a, s, eps0, tau, lam, t_e):
+    """
+    ε(a,s): perturbation multiplier for hazard at integration age s
+    for a cohort observed at age a.
+    
+    For s < a - t_e: event has not occurred yet for this cohort age → ε=0.
+    For s ≥ a - t_e: ε(a,s) = g(a) * exp(-λ * (t_e - (a - s))).
+    """
+    # scalar a, s (we treat them as floats here)
+    if s < a - t_e:
+        return 0.0
+    
+    g_a = g_of_a(np.array([a]), eps0, tau, t_e)[0]
+    # t_e - (a - s) = (t_e + s - a)
+    return g_a * np.exp(-lam * (t_e - (a - s)))
+
+
+# 4. Full perturbed hazard
+def hazard_with_perturbation(a, s, mu_ub, mu_lb, K, m,
+                             eps0, tau, lam, t_e):
+    """
+    μ_pert(a,s) = (1 + ε(a,s)) μ_Hill(s)
+    """
+    base = hill_hazard(s, mu_ub, mu_lb, K, m)
+    eps = epsilon(a, s, eps0, tau, lam, t_e)
+    return (1.0 + eps) * base
+
+
+# 5. Survival function f(a) with perturbation
+def survival_hill_with_perturbation(ages,
+                                    mu_ub, mu_lb, K, m,
+                                    eps0, tau, lam, t_e,
+                                    use_quad=True, n_grid=200):
+    """
+    Compute survival f(a) for an array of ages, under Hill hazard with
+    a time-dependent perturbation.
+
+    ages: 1D array of cohort ages (years)
+    use_quad: if True, use scipy.integrate.quad per age
+              if False, use simple trapezoidal rule on fixed grid.
+    """
+    ages = np.asarray(ages, dtype=float)
+    f_vals = np.empty_like(ages)
+
+    if use_quad:
+        # For each age, integrate μ_pert(a,s) from s=0 to s=a
+        for i, a in enumerate(ages):
+            if a <= 0:
+                f_vals[i] = 1.0
+                continue
+
+            def integrand(s):
+                return hazard_with_perturbation(
+                    a, s, mu_ub, mu_lb, K, m,
+                    eps0, tau, lam, t_e
+                )
+
+            integral, _ = quad(integrand, 0.0, a, limit=200)
+            f_vals[i] = np.exp(-integral)
+    else:
+        # Fixed grid trapezoidal rule (faster, approximate)
+        for i, a in enumerate(ages):
+            if a <= 0:
+                f_vals[i] = 1.0
+                continue
+
+            s_grid = np.linspace(0.0, a, n_grid)
+            mu_vals = hazard_with_perturbation(
+                a, s_grid, mu_ub, mu_lb, K, m,
+                eps0, tau, lam, t_e
+            )
+            integral = np.trapz(mu_vals, s_grid)
+            f_vals[i] = np.exp(-integral)
+
+    return f_vals
 
 
 def find_dip(df_analysis, sector):
@@ -42,21 +159,21 @@ def find_dip(df_analysis, sector):
     '''
     sector_list = ['G', 'M', 'F', 'J', 'K', 'C', 'H', 'S', 'N', 'I', 'P', 'L', 'Q', 'R']
     parameters = [
-    [0.13771959172635478, 0.06036883390826407, 9.683527817633134, 37.16554776246212], 
-    [0.10853423852842373, 0.06040203094166163, 10.324655252053779, 20.2431022135619], 
-    [0.08284949629045338, 0.07532170024242305, 7.246072550255881, 99.9995683704219], 
-    [0.13138419047680286, 0.06388417019228498, 9.027011437441391, 63.20559648903392], 
-    [0.07012004488933721, 0.011080713775644365, 17.599335895302804, 11.726782536983189], 
-    [0.09997597066599069, 0.049270691945483475, 8.699132957275232, 100.0], 
-    [0.19014425302275023, 0.02801565370451772, 6.937673733970917, 100.0], 
-    [0.14057209547880267, 1.0000000076278874e-10, 12.954253262292541, 5.19908018295204], 
-    [0.12396232834152839, 1e-10, 16.432702180468965, 3.6763918799521744], 
-    [0.12639658719104133, 1.0000000249470075e-10, 20.851108767628933, 3.8694205399833757], 
-    [0.1212132957507885, 0.06868421106599219, 9.445203344625348, 100.0], 
-    [0.07305173006148806, 0.07305173006148806, 4.686889369376459, 49.86003240187913], 
-    [0.07830160011697058, 0.047197607271208426, 7.792050676547918, 100.0], 
-    [0.13228889671445893, 0.0854858990969846, 8.857658026221204, 100.0]
-    ]
+        [0.13772780796801345, 0.06040065635354765, 9.678611031814139, 38.28653412450151],
+        [0.10853412588782649, 0.060405453614713986, 10.324137068120953, 20.272105749873536],
+        [0.08284945935354733, 0.07532165486572806, 7.246079688090822, 99.99992722770091],
+        [0.13138896943819373, 0.06387240987874851, 9.026894200245238, 64.59003275843841],
+        [0.07012013735407156, 0.011068176577001085, 17.600965883019793, 11.716328585887581],
+        [0.09997560159043367, 0.049269924679968866, 8.699286997697827, 100.0],
+        [0.19014381450690954, 0.028015942761638372, 6.937678823494837, 100.0],
+        [0.14057226596633066, 1e-10, 12.954249620403116, 5.199152676121435],
+        [0.12396183075343398, 1e-10, 16.432802053332697, 3.6763982546287552],
+        [0.12639621277376695, 1.0000001467199392e-10, 20.851484353072767, 3.8694421065642923],
+        [0.12121307544489934, 0.06868412785046317, 9.445279125853938, 100.0],
+        [0.07256783090508868, 0.0725678283579821, 14.249169553345428, 0.8209674189944658],
+        [0.07830172410553711, 0.04719751513515326, 7.792008550188214, 100.0],
+        [0.13228882837926284, 0.08548611352494333, 8.857641818720507, 100.0]
+        ]
     sector_params_MLE = dict(zip(sector_list, parameters))
 
     _, ages = obtain_survival_fractions(df_analysis, 'Sector', sector)

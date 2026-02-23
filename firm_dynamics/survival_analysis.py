@@ -30,29 +30,29 @@ def prepare_df():
     df_analysis['Entry Date'] = df['registration_incorporation_date']
     df_analysis['Entry Date'] = pd.to_datetime(df_analysis['Entry Date'])
 
-    # Read the geojson file
-    regions = gpd.read_file('region_boundary.geojson')
-    regions = regions.to_crs("EPSG:3414") # Convert to Singapore CRS
+    # # Read the geojson file
+    # regions = gpd.read_file('region_boundary.geojson')
+    # regions = regions.to_crs("EPSG:3414") # Convert to Singapore CRS
 
-    # Map the region names to the corresponding codes
-    region_map = {
-        'kml_1': 'WR',
-        'kml_2': 'NR',
-        'kml_3': 'NER',
-        'kml_4': 'ER',
-        'kml_5': 'CR'
-    }
-    regions['Name'] = regions['Name'].map(region_map)
+    # # Map the region names to the corresponding codes
+    # region_map = {
+    #     'kml_1': 'WR',
+    #     'kml_2': 'NR',
+    #     'kml_3': 'NER',
+    #     'kml_4': 'ER',
+    #     'kml_5': 'CR'
+    # }
+    # regions['Name'] = regions['Name'].map(region_map)
 
-    # Create a GeoDataFrame from the df DataFrame
-    geometry = [Point(xy) for xy in zip(df['Coordinate_X'], df['Coordinate_Y'])]
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:3414")
+    # # Create a GeoDataFrame from the df DataFrame
+    # geometry = [Point(xy) for xy in zip(df['Coordinate_X'], df['Coordinate_Y'])]
+    # gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:3414")
 
-    # Spatial join: assign each firm the region it falls into
-    gdf_with_region = gpd.sjoin(gdf, regions, how='left', predicate='within')
+    # # Spatial join: assign each firm the region it falls into
+    # gdf_with_region = gpd.sjoin(gdf, regions, how='left', predicate='within')
 
-    # Update df_analysis with the mapped region assignments
-    df_analysis['Region'] = gdf_with_region['Name'].values
+    # # Update df_analysis with the mapped region assignments
+    # df_analysis['Region'] = gdf_with_region['Name'].values
 
     return df_analysis
 
@@ -77,7 +77,7 @@ def obtain_survival_fractions(df, category=None, filter_val=None):
     df1['age_bin'] = pd.cut(df1['age'], bins)
 
     surv_frac = df1.groupby('age_bin', observed=True)['status'].mean().reset_index()
-    surv_frac = surv_frac[surv_frac['status'] != 0]
+
     survival_fractions = np.array(surv_frac['status'])
     ages = surv_frac['age_bin'].apply(lambda x: x.right).to_numpy()
 
