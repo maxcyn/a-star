@@ -1,6 +1,6 @@
 from firm_dynamics.hill import hill_hazard, model_survival_curve_hill
 import numpy as np
-from scipy.integrate import cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid, quad
 from firm_dynamics.survival_analysis import obtain_survival_fractions, obtain_total_alive_count
 from scipy.optimize import minimize
 
@@ -34,81 +34,10 @@ def hazard_with_perturbation(a, s, mu_ub, mu_lb, K, m,
     return (1.0 + eps) * base
 
 
-python
-import numpy as np
-from scipy.integrate import quad
-
-# 1. Baseline Hill hazard
-def hill_hazard(s, mu_ub, mu_lb, K, m):
-    """
-    Hill-type hazard function μ_Hill(s).
-    s: age (can be scalar or array)
-    """
-    s = np.asarray(s)
-    # Avoid division by zero when s=0
-    s_m = np.power(s, m)
-    denom = s_m + np.power(K, m)
-    frac = np.zeros_like(s, dtype=float)
-    mask = denom > 0
-    frac[mask] = s_m[mask] / denom[mask]
-    
-    mu = mu_ub - (mu_ub - mu_lb) * frac
-    return mu
-
-
-# 2. g(a): event-age amplitude function
-def g_of_a(a, eps0, tau, t_e):
-    """
-    g(a) governing initial amplitude of perturbation at cohort age a.
-    """
-    a = np.asarray(a)
-    g = np.empty_like(a, dtype=float)
-    
-    # Before event age
-    before = a < t_e
-    g[before] = eps0
-    
-    # After event age
-    after = ~before
-    g[after] = eps0 * np.exp(-tau * (a[after] - t_e))
-    
-    return g
-
-
-# 3. epsilon(a, s): perturbation term
-def epsilon(a, s, eps0, tau, lam, t_e):
-    """
-    ε(a,s): perturbation multiplier for hazard at integration age s
-    for a cohort observed at age a.
-    
-    For s < a - t_e: event has not occurred yet for this cohort age → ε=0.
-    For s ≥ a - t_e: ε(a,s) = g(a) * exp(-λ * (t_e - (a - s))).
-    """
-    # scalar a, s (we treat them as floats here)
-    if s < a - t_e:
-        return 0.0
-    
-    g_a = g_of_a(np.array([a]), eps0, tau, t_e)[0]
-    # t_e - (a - s) = (t_e + s - a)
-    return g_a * np.exp(-lam * (t_e - (a - s)))
-
-
-# 4. Full perturbed hazard
-def hazard_with_perturbation(a, s, mu_ub, mu_lb, K, m,
-                             eps0, tau, lam, t_e):
-    """
-    μ_pert(a,s) = (1 + ε(a,s)) μ_Hill(s)
-    """
-    base = hill_hazard(s, mu_ub, mu_lb, K, m)
-    eps = epsilon(a, s, eps0, tau, lam, t_e)
-    return (1.0 + eps) * base
-
-
 # 5. Survival function f(a) with perturbation
 def survival_hill_with_perturbation(ages,
                                     mu_ub, mu_lb, K, m,
-                                    eps0, tau, lam, t_e,
-                                    use_quad=True, n_grid=200):
+                                    eps0, tau, lam, t_e):
     """
     Compute survival f(a) for an array of ages, under Hill hazard with
     a time-dependent perturbation.
@@ -120,35 +49,20 @@ def survival_hill_with_perturbation(ages,
     ages = np.asarray(ages, dtype=float)
     f_vals = np.empty_like(ages)
 
-    if use_quad:
-        # For each age, integrate μ_pert(a,s) from s=0 to s=a
-        for i, a in enumerate(ages):
-            if a <= 0:
-                f_vals[i] = 1.0
-                continue
+    # For each age, integrate μ_pert(a,s) from s=0 to s=a
+    for i, a in enumerate(ages):
+        if a <= 0:
+            f_vals[i] = 1.0
+            continue
 
-            def integrand(s):
-                return hazard_with_perturbation(
-                    a, s, mu_ub, mu_lb, K, m,
-                    eps0, tau, lam, t_e
-                )
-
-            integral, _ = quad(integrand, 0.0, a, limit=200)
-            f_vals[i] = np.exp(-integral)
-    else:
-        # Fixed grid trapezoidal rule (faster, approximate)
-        for i, a in enumerate(ages):
-            if a <= 0:
-                f_vals[i] = 1.0
-                continue
-
-            s_grid = np.linspace(0.0, a, n_grid)
-            mu_vals = hazard_with_perturbation(
-                a, s_grid, mu_ub, mu_lb, K, m,
+        def integrand(s):
+            return hazard_with_perturbation(
+                a, s, mu_ub, mu_lb, K, m,
                 eps0, tau, lam, t_e
             )
-            integral = np.trapz(mu_vals, s_grid)
-            f_vals[i] = np.exp(-integral)
+
+        integral, _ = quad(integrand, 0.0, a, limit=200)
+        f_vals[i] = np.exp(-integral)
 
     return f_vals
 
@@ -200,75 +114,154 @@ def find_dip(df_analysis, sector):
     return float(np.mean(best_cluster)) if len(best_cluster) > 0 else None
 
 
-def neg_ll_hill_with_dip(params, ages, survivors, totals):
-    mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
-    ll = 0
-    if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0 or t_e < 0 or eps0 < 0 or tau <= 0 or lam <= 0:
-        return np.inf
+def log_likelihood_perturbed(params, ages, survivors, totals):
+    """
+    Binomial log-likelihood for the perturbed Hill survival model.
 
-    S_vals = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
-    S_vals = np.clip(S_vals, 1e-12, 1 - 1e-12)  # avoid log(0)
+    params: array-like of length 8:
+        [mu_ub, mu_lb, K, m, eps0, tau, lam, t_e]
+    ages:      1D array of ages (years)
+    survivors: number of survivors at each age
+    totals:    cohort size at each age
+    """
+    (mu_ub, mu_lb, K, m,
+     eps0, tau, lam, t_e) = params
+
+    # Basic parameter validity checks (adapt bounds as needed)
+    if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0:
+        return -np.inf
+    if eps0 < 0 or tau < 0 or lam < 0:
+        return -np.inf
+
+    # Survival probabilities at each age
+    S_vals = survival_hill_with_perturbation(
+        ages, mu_ub, mu_lb, K, m,
+        eps0, tau, lam, t_e
+    )
+
+    # Numerical safety: keep inside (0,1)
+    S_vals = np.clip(S_vals, 1e-12, 1 - 1e-12)
 
     deaths = totals - survivors
-    logL = np.sum(survivors * np.log(S_vals) + deaths * np.log(1 - S_vals))
-    return -logL  # minimize negative log-likelihood
+
+    # Extra consistency check
+    if (np.any(deaths < 0) or
+        np.any(survivors < 0) or
+        np.any(survivors > totals)):
+        return -np.inf
+
+    logL = np.sum(
+        survivors * np.log(S_vals) +
+        deaths * np.log(1.0 - S_vals)
+    )
+    return logL
 
 
-def mlefit_hill_with_dip(ages, survivors, totals, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
-    '''
-    Fit the Hill model with dip using MLE.
-    '''
+def neg_log_likelihood_perturbed(params, ages, survivors, totals):
+    """
+    Wrapper returning -logL for use with scipy.optimize.minimize.
+    """
+    ll = log_likelihood_perturbed(params, ages, survivors, totals)
+    if not np.isfinite(ll):
+        return 1e10  # large penalty
+    return -ll
+
+
+def mle_sector_perturbed(sector, df_analysis,
+                         ages_data,
+                         initial_hill_params=None):
+    """
+    MLE of perturbed Hill model for a single sector.
+
+    sector: sector label
+    df_analysis: your DataFrame with firm data
+    ages_data: global age grid (1D array)
+    initial_hill_params: optional initial guess for [mu_ub, mu_lb, K, m].
+                         If None, you can plug in the Hill-only MLE.
+
+    Returns:
+        result (scipy OptimizeResult), plus the data used.
+    """
+    # 1) Get counts for this sector
+    totals, survivors = obtain_total_alive_count(df_analysis, 'Sector', sector)
+
+    valid_mask = totals > 0
+    totals = totals[valid_mask]
+    survivors = survivors[valid_mask]
+    ages = ages_data[:len(survivors)].astype(float)
+
+    if len(survivors) == 0:
+        raise ValueError(f"No valid data for sector {sector}")
+
+    # 2) Initial guess
+    if initial_hill_params is None:
+        # crude defaults; ideally insert your sector's Hill MLE here
+        mu_ub0 = 0.12
+        mu_lb0 = 0.04
+        K0 = 10.0
+        m0 = 10.0
+    else:
+        mu_ub0, mu_lb0, K0, m0 = initial_hill_params
+
+    eps0_0 = 0.5      # starting amplitude
+    tau_0 = 0.1      # age-distance decay
+    lam_0 = 0.1      # time-since-event decay
+    t_e_0 = find_dip(df_analysis, sector)     # event time guess (years since birth for reference cohort)
+
+    initial_guess = np.array([
+        mu_ub0, mu_lb0, K0, m0,
+        eps0_0, tau_0, lam_0, t_e_0
+    ])
+
+    # 3) Bounds for parameters
     bounds = [
-        (0.01, 0.3),   # mu_ub
-        (10e-6, 0.15),   # mu_lb
-        (0.1, 30),     # K
-        (0.5, 50),    # m
-        (3, 10),      # t_e
-        (0, 20),    # eps0
-        (0.01, 15),      # tau
-        (10e-6, 15)      # lam
+        (1e-6, 0.3),    # mu_ub
+        (1e-6, 0.15),   # mu_lb
+        (0.1, 50.0),    # K
+        (0.1, 100.0),   # m
+        (0.0, 5.0),     # eps0 (>=0; adjust upper bound as needed)
+        (0.0, 5.0),     # tau
+        (0.0, 5.0),     # lam
+        (0.0, ages.max())  # t_e within age range
     ]
 
-    constraints = [
-        {'type': 'ineq', 'fun': lambda x: x[0] - x[1]},  # mu_ub - mu_lb > 0
-        {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
-    ]
-
+    # 4) Optimisation
     result = minimize(
-        neg_ll_hill_with_dip,
+        neg_log_likelihood_perturbed,
         initial_guess,
         args=(ages, survivors, totals),
+        method='L-BFGS-B',
         bounds=bounds,
-        constraints=constraints
+        options={'maxiter': 500}
     )
 
     return result
 
 
-def lsq_hill_with_dip(params, ages, survival_fractions):
-    mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
-    model = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
-    model = np.clip(model, 1e-12, 1 - 1e-12)
-    return np.sum((survival_fractions - model) ** 2)
+# def lsq_hill_with_dip(params, ages, survival_fractions):
+#     mu_ub, mu_lb, K, m, t_e, eps0, tau, lam = params
+#     model = model_hill_with_dip(ages, mu_ub, mu_lb, K, m, t_e, eps0, tau, lam)
+#     model = np.clip(model, 1e-12, 1 - 1e-12)
+#     return np.sum((survival_fractions - model) ** 2)
 
 
-def lsqfit_hill_with_dip(ages, survival_fractions, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
-    '''
-    Least squares fit for the Hill model with dip.
-    '''
-    bounds = [
-        (0.01, 0.3),   # mu_ub
-        (0.001, 0.15),   # mu_lb
-        (0.1, 30),     # K
-        (0.5, 50),    # m
-        (3, 10),      # t_e
-        (0, 20),    # eps0
-        (0.01, 10),      # tau
-        (10e-6, 10)      # lam
-    ]
+# def lsqfit_hill_with_dip(ages, survival_fractions, initial_guess=[0.1, 0.05, 10, 5, 7, 1, 1, 1]):
+#     '''
+#     Least squares fit for the Hill model with dip.
+#     '''
+#     bounds = [
+#         (0.01, 0.3),   # mu_ub
+#         (0.001, 0.15),   # mu_lb
+#         (0.1, 30),     # K
+#         (0.5, 50),    # m
+#         (3, 10),      # t_e
+#         (0, 20),    # eps0
+#         (0.01, 10),      # tau
+#         (10e-6, 10)      # lam
+#     ]
 
-    constraints = [
-        {'type': 'ineq', 'fun': lambda x: x[0] - x[1]},  # mu_ub - mu_lb > 0
-        {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
-    ]
-    minimize(lsq_hill_with_dip, initial_guess, args=(ages, survival_fractions), bounds=bounds, constraints=constraints)
+#     constraints = [
+#         {'type': 'ineq', 'fun': lambda x: x[0] - x[1]},  # mu_ub - mu_lb > 0
+#         {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
+#     ]
+#     minimize(lsq_hill_with_dip, initial_guess, args=(ages, survival_fractions), bounds=bounds, constraints=constraints)
