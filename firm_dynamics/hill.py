@@ -20,8 +20,7 @@ def model_survival_curve_hill(ages, mu_ub, mu_lb, K, m):
     Compute the survival curve based on the Hill hazard function.
     '''
     hazard_rates = hill_hazard(ages, mu_ub, mu_lb, K, m)
-    initial_cum = hazard_rates[0] * ages[0]  # Approximate integral from 0 to first age
-    cumulative_hazard = cumulative_trapezoid(hazard_rates, ages, initial=initial_cum)
+    cumulative_hazard = cumulative_trapezoid(hazard_rates, ages, initial=0.0)
     survival_curve = np.exp(-cumulative_hazard)
     return survival_curve
 

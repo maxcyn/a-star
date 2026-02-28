@@ -1,6 +1,6 @@
 from firm_dynamics.hill import hill_hazard, model_survival_curve_hill
 import numpy as np
-from scipy.integrate import cumulative_trapezoid, quad
+from scipy.integrate import trapezoid, quad
 from firm_dynamics.survival_analysis import obtain_survival_fractions, obtain_total_alive_count
 from scipy.optimize import minimize
 
@@ -24,13 +24,13 @@ def epsilon(s, a, eps0, tau, lam, t_e):
         return g(a, eps0, tau, t_e)*np.exp(-lam*(t_e-(a-s)))
 
 
-def hazard_with_perturbation(a, s, mu_ub, mu_lb, K, m,
+def hazard_with_perturbation(s, a, mu_ub, mu_lb, K, m,
                              eps0, tau, lam, t_e):
     """
     μ_pert(a,s) = (1 + ε(a,s)) μ_Hill(s)
     """
     base = hill_hazard(s, mu_ub, mu_lb, K, m)
-    eps = epsilon(a, s, eps0, tau, lam, t_e)
+    eps = epsilon(s, a, eps0, tau, lam, t_e)
     return (1.0 + eps) * base
 
 
@@ -57,11 +57,11 @@ def survival_hill_with_perturbation(ages,
 
         def integrand(s):
             return hazard_with_perturbation(
-                a, s, mu_ub, mu_lb, K, m,
+                s, a, mu_ub, mu_lb, K, m,
                 eps0, tau, lam, t_e
             )
 
-        integral, _ = quad(integrand, 0.0, a, limit=200)
+        integral, _ = quad(integrand, 0.0, a)
         f_vals[i] = np.exp(-integral)
 
     return f_vals
@@ -168,8 +168,7 @@ def neg_log_likelihood_perturbed(params, ages, survivors, totals):
 
 
 def mle_sector_perturbed(sector, df_analysis,
-                         ages_data,
-                         initial_hill_params=None):
+                         initial_guess=[0.1, 0.05, 10, 5, 1, 1, 1, 7]):
     """
     MLE of perturbed Hill model for a single sector.
 
@@ -188,32 +187,12 @@ def mle_sector_perturbed(sector, df_analysis,
     valid_mask = totals > 0
     totals = totals[valid_mask]
     survivors = survivors[valid_mask]
-    ages = ages_data[:len(survivors)].astype(float)
+    ages = obtain_survival_fractions(df_analysis, 'Sector', sector)[1][valid_mask]
 
     if len(survivors) == 0:
         raise ValueError(f"No valid data for sector {sector}")
 
-    # 2) Initial guess
-    if initial_hill_params is None:
-        # crude defaults; ideally insert your sector's Hill MLE here
-        mu_ub0 = 0.12
-        mu_lb0 = 0.04
-        K0 = 10.0
-        m0 = 10.0
-    else:
-        mu_ub0, mu_lb0, K0, m0 = initial_hill_params
-
-    eps0_0 = 0.5      # starting amplitude
-    tau_0 = 0.1      # age-distance decay
-    lam_0 = 0.1      # time-since-event decay
-    t_e_0 = find_dip(df_analysis, sector)     # event time guess (years since birth for reference cohort)
-
-    initial_guess = np.array([
-        mu_ub0, mu_lb0, K0, m0,
-        eps0_0, tau_0, lam_0, t_e_0
-    ])
-
-    # 3) Bounds for parameters
+    # 2) Bounds for parameters
     bounds = [
         (1e-6, 0.3),    # mu_ub
         (1e-6, 0.15),   # mu_lb
@@ -225,7 +204,7 @@ def mle_sector_perturbed(sector, df_analysis,
         (0.0, ages.max())  # t_e within age range
     ]
 
-    # 4) Optimisation
+    # 3) Optimisation
     result = minimize(
         neg_log_likelihood_perturbed,
         initial_guess,
@@ -265,3 +244,101 @@ def mle_sector_perturbed(sector, df_analysis,
 #         {'type': 'ineq', 'fun': lambda x: x[6] - x[7]},  # tau - lam > 0
 #     ]
 #     minimize(lsq_hill_with_dip, initial_guess, args=(ages, survival_fractions), bounds=bounds, constraints=constraints)
+
+
+def epsilon_simple_vec(s_grid, a, eps0, lam, t_e):
+    s = np.asarray(s_grid, dtype=float)
+    eps = np.zeros_like(s)
+    mask = s >= (a - t_e)
+    eps[mask] = eps0 * np.exp(-lam * (t_e - (a - s[mask])))
+    return eps
+
+
+def survival_hill_with_perturbation_fast(ages,
+                                         mu_ub, mu_lb, K, m,
+                                         eps0, lam, t_e):
+    ages = np.asarray(ages, dtype=float)
+    f_vals = np.empty_like(ages)
+    for i, a in enumerate(ages):
+        if a <= 0:
+            f_vals[i] = 1.0
+            continue
+
+        s_grid = np.linspace(0.0, a, n_grid)
+        integral = (quad(hill_hazard(s_grid, mu_ub, mu_lb, K, m) *
+                              (1.0 + epsilon_simple_vec(s_grid, a, eps0, lam, t_e)), s_grid)
+                    )
+        f_vals[i] = np.exp(-integral)
+
+    return f_vals
+
+
+def log_likelihood_perturbed_fast(params, ages, survivors, totals,
+                                  n_grid=300):
+    mu_ub, mu_lb, K, m, eps0, lam, t_e = params
+
+    if mu_lb < 0 or mu_ub < mu_lb or K <= 0 or m <= 0:
+        return -np.inf
+    if eps0 < 0 or lam < 0 or t_e < 0 or t_e > ages.max():
+        return -np.inf
+
+    S_vals = survival_hill_with_perturbation_fast(
+        ages, mu_ub, mu_lb, K, m, eps0, lam, t_e,
+        n_grid=n_grid
+    )
+    S_vals = np.clip(S_vals, 1e-12, 1 - 1e-12)
+
+    deaths = totals - survivors
+    if (np.any(deaths < 0) or
+        np.any(survivors < 0) or
+        np.any(survivors > totals)):
+        return -np.inf
+
+    logL = np.sum(
+        survivors * np.log(S_vals) +
+        deaths    * np.log(1.0 - S_vals)
+    )
+    return logL
+
+
+def neg_log_likelihood_perturbed_fast(params, ages, survivors, totals,
+                                      n_grid=300):
+    ll = log_likelihood_perturbed_fast(params, ages, survivors, totals,
+                                       n_grid=n_grid)
+    if not np.isfinite(ll):
+        return 1e10
+    return -ll
+
+
+def mle_sector_perturbed_fast(sector, df_analysis,
+                              initial_guess=[0.1, 0.05, 10, 5, 1, 1, 7],
+                              n_grid=300):
+    totals, survivors = obtain_total_alive_count(df_analysis, 'Sector', sector)
+    valid_mask = totals > 0
+    totals = totals[valid_mask]
+    survivors = survivors[valid_mask]
+    ages = obtain_survival_fractions(df_analysis, 'Sector', sector)[1][valid_mask]
+
+    if len(survivors) == 0:
+        raise ValueError(f"No valid data for sector {sector}")
+
+    bounds = [
+        (1e-6, 0.3),              # mu_ub
+        (1e-6, 0.15),             # mu_lb
+        (0.1, 50.0),              # K
+        (0.1, 100.0),             # m
+        (0.0, 10.0),               # eps0
+        (0.0, 30.0),               # lam
+        (0.0, 10)  # t_e
+    ]
+
+    result = minimize(
+        neg_log_likelihood_perturbed_fast,
+        initial_guess,
+        args=(ages, survivors, totals, n_grid),
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 500}
+    )
+
+    return result
